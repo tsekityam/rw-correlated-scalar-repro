@@ -1,0 +1,26 @@
+{
+  "name": "RisingWave correlated-scalar repro",
+  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.yml"],
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [4566, 5691],
+  "portsAttributes": {
+    "4566": { "label": "RisingWave SQL (psql)" },
+    "5691": { "label": "RisingWave dashboard" }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y postgresql-client",
+  "postStartCommand": "bash scripts/wait-for-rw.sh",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "remoteEnv": {
+    "PGHOST": "risingwave",
+    "PGPORT": "4566",
+    "PGDATABASE": "dev",
+    "PGUSER": "root"
+  }
+}

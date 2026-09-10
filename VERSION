@@ -1,0 +1,10 @@
+# Pinned RisingWave image for this repro.
+# How to bump:
+#   1. Check the latest stable tag at
+#      https://github.com/risingwavelabs/risingwave/releases
+#      and https://hub.docker.com/r/risingwavelabs/risingwave/tags
+#   2. Set RW_IMAGE below (and in docker-compose.yml default) to
+#      risingwavelabs/risingwave:vX.Y.Z
+#   3. Keep the container command as `single_node --in-memory`
+#      (official playground / quickstart standalone style).
+RW_IMAGE=risingwavelabs/risingwave:v3.0.3

@@ -1,0 +1,39 @@
+# Official playground / quickstart style: one RisingWave process, psql on :4566.
+# Pin is documented in VERSION. Override with:
+#   RW_IMAGE=risingwavelabs/risingwave:vX.Y.Z docker compose up
+#
+# Latest stable at time of writing: v3.0.3 (2026-08-17).
+services:
+  risingwave:
+    image: ${RW_IMAGE:-risingwavelabs/risingwave:v3.0.3}
+    container_name: rw-correlated-scalar-repro
+    command: ["single_node", "--in-memory"]
+    ports:
+      - "4566:4566"
+      - "5691:5691"
+    environment:
+      ENABLE_TELEMETRY: "false"
+      RUST_BACKTRACE: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/4566'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  # Optional one-shot runner: docker compose --profile test run --rm tester
+  tester:
+    profiles: ["test"]
+    image: postgres:16
+    depends_on:
+      risingwave:
+        condition: service_healthy
+    environment:
+      PGHOST: risingwave
+      PGPORT: "4566"
+      PGDATABASE: dev
+      PGUSER: root
+    volumes:
+      - .:/repro
+    working_dir: /repro
+    entrypoint: ["bash", "/repro/scripts/run-repro.sh"]
