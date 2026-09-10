@@ -190,13 +190,21 @@ Schema (synthetic):
 
 ```sql
 SELECT
-  s.user_id,
-  w.lifetime_sum AS expected_sum,
-  (SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id) AS scalar_sum,
-  abs(w.lifetime_sum - (SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id)) < 1e-12 AS match
-FROM (SELECT user_id FROM windows ORDER BY random() LIMIT 50) s
-JOIN windows w ON w.user_id = s.user_id;
+  q.user_id,
+  q.expected_sum,
+  q.scalar_sum,
+  abs(q.expected_sum - q.scalar_sum) < 0.000000000001 AS match
+FROM (
+  SELECT
+    s.user_id,
+    w.lifetime_sum AS expected_sum,
+    (SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id) AS scalar_sum
+  FROM (SELECT user_id FROM windows ORDER BY random() LIMIT 50) s
+  JOIN windows w ON w.user_id = s.user_id
+) q;
 ```
+
+`match` is derived from that same `scalar_sum` (do not write a second `(SELECT SUM …)` in the select list — RisingWave decorrelates each one independently).
 
 **Query B (correct workaround):**
 

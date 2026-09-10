@@ -119,7 +119,7 @@ run_query_a() {
   local n_scalar_null
   n_scalar_null="$(awk -F '\t' 'NF>=3 && $3 == "" { c++ } END { print c+0 }' "${out}")"
   echo "rows=${n} match_true=${n_true} match_false=${n_false} match_null=${n_null} scalar_sum_null=${n_scalar_null}"
-  echo "NOTE: match_null usually means a correlated SUM came back NULL (SQL NULL < eps is NULL)."
+  echo "NOTE: match is abs(expected_sum - scalar_sum) < eps on those same columns; NULL when scalar_sum is NULL."
   A_RAN=$((A_RAN + 1))
   if [[ "${n}" -eq 0 ]]; then
     echo "WARNING: ${name} returned 0 rows."
@@ -190,54 +190,53 @@ ORDER BY i.user_id;
 # --- Control: single literal user (often matches even when the sample path does not)
 CONTROL_SQL="
 SELECT
-    w.user_id,
-    w.lifetime_sum AS expected_sum,
-    (
-        SELECT SUM(h.amount)
-        FROM hourly_facts h
-        WHERE h.user_id = w.user_id
-    ) AS scalar_sum,
-    abs(
-        w.lifetime_sum
-        - (
+    q.user_id,
+    q.expected_sum,
+    q.scalar_sum,
+    abs(q.expected_sum - q.scalar_sum) < 0.000000000001 AS match
+FROM (
+    SELECT
+        w.user_id,
+        w.lifetime_sum AS expected_sum,
+        (
             SELECT SUM(h.amount)
             FROM hourly_facts h
             WHERE h.user_id = w.user_id
-        )
-    ) < 0.000000000001 AS match
-FROM windows w
-WHERE w.user_id = '${CONTROL_USER}';
+        ) AS scalar_sum
+    FROM windows w
+    WHERE w.user_id = '${CONTROL_USER}'
+) AS q;
 "
 set +e
 run_query_a "control_literal_user" "${CONTROL_SQL}"
 set -e
 
 # --- Variant 1: production pattern — derived sample + correlated scalar SUM
+# Compare match against the same scalar_sum alias (not a second independent SUM).
 V1="
 SELECT
-    s.user_id,
-    w.lifetime_sum AS expected_sum,
-    (
-        SELECT SUM(h.amount)
-        FROM hourly_facts h
-        WHERE h.user_id = s.user_id
-    ) AS scalar_sum,
-    abs(
-        w.lifetime_sum
-        - (
+    q.user_id,
+    q.expected_sum,
+    q.scalar_sum,
+    abs(q.expected_sum - q.scalar_sum) < 0.000000000001 AS match
+FROM (
+    SELECT
+        s.user_id,
+        w.lifetime_sum AS expected_sum,
+        (
             SELECT SUM(h.amount)
             FROM hourly_facts h
             WHERE h.user_id = s.user_id
-        )
-    ) < 0.000000000001 AS match
-FROM (
-    SELECT user_id
-    FROM windows
-    ORDER BY ${SAMPLE_ORDER}
-    LIMIT 50
-) AS s
-JOIN windows w ON w.user_id = s.user_id
-ORDER BY s.user_id;
+        ) AS scalar_sum
+    FROM (
+        SELECT user_id
+        FROM windows
+        ORDER BY ${SAMPLE_ORDER}
+        LIMIT 50
+    ) AS s
+    JOIN windows w ON w.user_id = s.user_id
+) AS q
+ORDER BY q.user_id;
 "
 set +e
 run_query_a "sample_random_limit_scalar" "${V1}"
@@ -246,40 +245,45 @@ set -e
 extract_ids < "${WORKDIR}/a_sample_random_limit_scalar.tsv" > "${WORKDIR}/ids.txt"
 
 # --- Variant 2: several correlated scalars at once (lifetime, day-1, count)
+# Each SUM/COUNT is selected once; match uses those aliases, not extra SUMs.
 V2="
 SELECT
-    s.user_id,
-    w.lifetime_sum AS expected_sum,
+    q.user_id,
+    q.expected_sum,
+    q.scalar_sum,
     (
-        SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id
-    ) AS scalar_sum,
-    (
-        abs(
-            w.lifetime_sum
-            - (SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id)
-        ) < 0.000000000001
-        AND abs(
-            d.day1_sum
-            - (
-                SELECT SUM(h.amount)
-                FROM hourly_facts h
-                WHERE h.user_id = s.user_id
-                  AND h.hour_utc < TIMESTAMP '2024-01-02 00:00:00'
-            )
-        ) < 0.000000000001
-        AND (
-            SELECT COUNT(*) FROM hourly_facts h WHERE h.user_id = s.user_id
-        ) = w.n_hours
+        abs(q.expected_sum - q.scalar_sum) < 0.000000000001
+        AND abs(q.day1_expected - q.day1_sum) < 0.000000000001
+        AND q.n_hours_scalar = q.n_hours
     ) AS match
 FROM (
-    SELECT user_id
-    FROM windows
-    ORDER BY ${SAMPLE_ORDER}
-    LIMIT 50
-) AS s
-JOIN windows w ON w.user_id = s.user_id
-JOIN day1_windows d ON d.user_id = s.user_id
-ORDER BY s.user_id;
+    SELECT
+        s.user_id,
+        w.lifetime_sum AS expected_sum,
+        d.day1_sum AS day1_expected,
+        w.n_hours,
+        (
+            SELECT SUM(h.amount) FROM hourly_facts h WHERE h.user_id = s.user_id
+        ) AS scalar_sum,
+        (
+            SELECT SUM(h.amount)
+            FROM hourly_facts h
+            WHERE h.user_id = s.user_id
+              AND h.hour_utc < TIMESTAMP '2024-01-02 00:00:00'
+        ) AS day1_sum,
+        (
+            SELECT COUNT(*) FROM hourly_facts h WHERE h.user_id = s.user_id
+        ) AS n_hours_scalar
+    FROM (
+        SELECT user_id
+        FROM windows
+        ORDER BY ${SAMPLE_ORDER}
+        LIMIT 50
+    ) AS s
+    JOIN windows w ON w.user_id = s.user_id
+    JOIN day1_windows d ON d.user_id = s.user_id
+) AS q
+ORDER BY q.user_id;
 "
 set +e
 run_query_a "sample_multi_scalar" "${V2}"
@@ -316,28 +320,27 @@ set -e
 # --- Variant 4: derived LIMIT without ORDER BY (still a sample subquery)
 V4="
 SELECT
-    s.user_id,
-    w.lifetime_sum AS expected_sum,
-    (
-        SELECT SUM(h.amount)
-        FROM hourly_facts h
-        WHERE h.user_id = s.user_id
-    ) AS scalar_sum,
-    abs(
-        w.lifetime_sum
-        - (
+    q.user_id,
+    q.expected_sum,
+    q.scalar_sum,
+    abs(q.expected_sum - q.scalar_sum) < 0.000000000001 AS match
+FROM (
+    SELECT
+        s.user_id,
+        w.lifetime_sum AS expected_sum,
+        (
             SELECT SUM(h.amount)
             FROM hourly_facts h
             WHERE h.user_id = s.user_id
-        )
-    ) < 0.000000000001 AS match
-FROM (
-    SELECT user_id
-    FROM windows
-    LIMIT 50
-) AS s
-JOIN windows w ON w.user_id = s.user_id
-ORDER BY s.user_id;
+        ) AS scalar_sum
+    FROM (
+        SELECT user_id
+        FROM windows
+        LIMIT 50
+    ) AS s
+    JOIN windows w ON w.user_id = s.user_id
+) AS q
+ORDER BY q.user_id;
 "
 set +e
 run_query_a "sample_limit_only" "${V4}"
