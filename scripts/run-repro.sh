@@ -134,7 +134,10 @@ run_query_a() {
   stats="$(count_bool_col 4 < "${out}")"
   local n n_true n_false n_null
   read -r n n_true n_false n_null <<<"${stats}"
-  echo "rows=${n} match_true=${n_true} match_false=${n_false} match_null=${n_null}"
+  local n_scalar_null
+  n_scalar_null="$(awk -F '\t' 'NF>=3 && $3 == "" { c++ } END { print c+0 }' "${out}")"
+  echo "rows=${n} match_true=${n_true} match_false=${n_false} match_null=${n_null} scalar_sum_null=${n_scalar_null}"
+  echo "NOTE: match_null usually means a correlated SUM came back NULL (SQL NULL < eps is NULL)."
   A_RAN=$((A_RAN + 1))
   if [[ "${n}" -eq 0 ]]; then
     echo "WARNING: ${name} returned 0 rows."
@@ -358,46 +361,27 @@ set +e
 run_query_a "sample_limit_only" "${V4}"
 set -e
 
-# --- Variant 5: BOOL_AND over the sample (single-row summary, production-style)
-banner "Query A / bool_and_summary"
-BOOL_SQL="
-SELECT
-    COUNT(*) AS n,
-    BOOL_AND(
-        abs(
-            w.lifetime_sum
-            - (
-                SELECT SUM(h.amount)
-                FROM hourly_facts h
-                WHERE h.user_id = s.user_id
-            )
-        ) < 0.000000000001
-    ) AS all_match,
-    AVG((
-        SELECT SUM(h.amount)
-        FROM hourly_facts h
-        WHERE h.user_id = s.user_id
-    )) AS avg_scalar,
-    AVG(w.lifetime_sum) AS avg_expected
-FROM (
-    SELECT user_id
-    FROM windows
-    ORDER BY ${SAMPLE_ORDER}
-    LIMIT 50
-) AS s
-JOIN windows w ON w.user_id = s.user_id;
-"
-echo "${BOOL_SQL}"
-psql_ok -c "${BOOL_SQL}" | tee "${WORKDIR}/bool_and.txt"
-BOOL_MATCH="$(psql_tuples -c "${BOOL_SQL}" | awk -F '\t' 'NF>=2 { print $2 }' | tr -d '\r')"
-echo "BOOL_AND all_match=${BOOL_MATCH}"
-A_RAN=$((A_RAN + 1))
-if [[ "${BOOL_MATCH}" != "t" && "${BOOL_MATCH}" != "true" ]]; then
-  echo "MISMATCH: BOOL_AND over the random sample is not true."
-  A_MISMATCH=$((A_MISMATCH + 1))
-  if [[ -z "${REPRO_VARIANT}" ]]; then
-    REPRO_VARIANT="bool_and_summary"
+# --- Variant 5: BOOL_AND of the sample, computed client-side.
+# RisingWave rejects "subquery inside aggregation calls", so we do not
+# ask the engine for BOOL_AND((SELECT SUM...) ...).
+banner "Query A / bool_and_summary (client-side)"
+PRIMARY_TSV="${WORKDIR}/a_sample_random_limit_scalar.tsv"
+if [[ -s "${PRIMARY_TSV}" ]]; then
+  stats="$(count_bool_col 4 < "${PRIMARY_TSV}")"
+  read -r n n_true n_false n_null <<<"${stats}"
+  echo "BOOL_AND(match) over sample_random_limit_scalar: n=${n} true=${n_true} false=${n_false} null=${n_null}"
+  A_RAN=$((A_RAN + 1))
+  if [[ "${n}" -gt 0 && "${n_true}" -eq "${n}" ]]; then
+    echo "OK: client-side BOOL_AND is true."
+  else
+    echo "MISMATCH: client-side BOOL_AND is not true (production-style all-false / NULL sample check)."
+    A_MISMATCH=$((A_MISMATCH + 1))
+    if [[ -z "${REPRO_VARIANT}" ]]; then
+      REPRO_VARIANT="bool_and_summary"
+    fi
   fi
+else
+  echo "No primary sample TSV; skipping client-side BOOL_AND."
 fi
 
 # If we still have no ids (every A variant failed to produce rows), use a fixed set.
@@ -433,7 +417,20 @@ if [[ "${A_MISMATCH}" -gt 0 ]]; then
   echo "BUG REPRODUCED: correlated scalar SUM over a derived sample disagrees"
   echo "with expected / windows totals, while Query B (VALUES + IN + GROUP BY + JOIN) matches."
   echo "First failing variant: ${REPRO_VARIANT}"
+  echo "Typical wrong value is NULL (decorrelated plan re-runs ORDER BY random()/LIMIT"
+  echo "independently on the agg side, then LeftOuter/FullOuter-joins a different sample)."
+  echo "Control (literal user) and LATERAL usually match; that is expected."
   echo "This exit status is the intended signal for the upstream issue."
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo "## BUG REPRODUCED"
+      echo
+      echo "- RisingWave: \`${RW_VERSION}\`"
+      echo "- First failing variant: \`${REPRO_VARIANT}\`"
+      echo "- Query A mismatches: ${A_MISMATCH} / ${A_RAN}"
+      echo "- Query B: matched"
+    } >> "${GITHUB_STEP_SUMMARY}"
+  fi
   exit 1
 fi
 

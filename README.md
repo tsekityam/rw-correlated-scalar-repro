@@ -64,9 +64,29 @@ RW_IMAGE=risingwavelabs/risingwave:vX.Y.Z docker compose up -d --wait risingwave
 2. Same sample with several scalars at once (`SUM` lifetime, `SUM` day-1, `COUNT(*)`).
 3. `LATERAL` form of the same `SUM`.
 4. Derived `LIMIT 50` without `ORDER BY`.
-5. `BOOL_AND(abs(delta) < 1e-12)` over the sample.
+5. Client-side `BOOL_AND(match)` over that sample (RisingWave rejects a subquery inside `BOOL_AND`).
 
 If `random()` is missing on a build, the script falls back to `ORDER BY md5(user_id) LIMIT n` (still a derived table + `LIMIT`).
+
+### Observed on v3.0.3 (CI)
+
+`PostgreSQL 13.14.0-RisingWave-3.0.3`. Seed and Query B succeed. Control (`WHERE user_id = 'literal'`) and **LATERAL** match. The select-list correlated `SUM` over a derived `LIMIT` sample does not:
+
+| Variant | Result on v3.0.3 |
+| --- | --- |
+| `control_literal_user` | 1/1 match |
+| `sample_random_limit_scalar` | 21/50 match, **29 NULL** `SUM`s |
+| `sample_multi_scalar` | 13/50 match, 37 NULL |
+| `sample_lateral` | 50/50 match |
+| `sample_limit_only` | 30/50 match, 20 NULL |
+| Query B (`VALUES` + `IN` + `GROUP BY` + `JOIN`) | matches (workaround) |
+
+`EXPLAIN` of Query A shows the optimizer **re-executing** `TopN { order: [Random], limit: 50 }` (or `Limit 50`) on **both** sides of a `LeftOuter` / `FullOuter` join. Because `random()` is non-deterministic, the two samples are different users; the join then yields `NULL` for the scalar `SUM`. That is why a single-user literal probe can be correct while the sample path is systematically empty.
+
+Secondary (logged, not the fail reason):
+
+- `WITH s AS MATERIALIZED (...)` → `sql parser error: Expected 'changelog' but found 'MATERIALIZED'`
+- `CAST(... AS UUID)` → `unsupported data type: UUID`
 
 **Query B** (known-good workaround) — the sampled ids as `VALUES`, `WHERE user_id IN (...)`, `GROUP BY user_id`, `JOIN` back to `windows`. This must match.
 
@@ -149,7 +169,7 @@ when `s` is produced by a derived table such as:
 (SELECT user_id FROM windows ORDER BY random() LIMIT 50)
 ```
 
-On a synthetic dataset with a known lifetime `SUM` per `user_id`, this path disagrees with a pre-aggregated `GROUP BY user_id` materialized view (`windows`). In the original observation the scalar side was ~0 / `BOOL_AND(abs(delta) < 1e-12)` was false for the whole sample.
+On a synthetic dataset with a known lifetime `SUM` per `user_id`, this path disagrees with a pre-aggregated `GROUP BY user_id` materialized view (`windows`). On v3.0.3 the scalar side is often **NULL** (29/50 rows in one CI run), so a `BOOL_AND(abs(delta) < eps)` over the sample is not true. If the caller coalesces NULL to 0, the source side looks like ~0.
 
 The **same** `user_id`s computed via a fixed `VALUES` list + `WHERE user_id IN (...)` + `GROUP BY` + `JOIN` match the MV exactly.
 
@@ -203,19 +223,25 @@ JOIN (
 ) a ON a.user_id = i.user_id;
 ```
 
-The repro script also tries `LATERAL`, multiple scalars, `LIMIT` without `ORDER BY`, and `BOOL_AND` over the sample.
+The repro script also tries `LATERAL` (correct on v3.0.3), multiple scalars, `LIMIT` without `ORDER BY`, and a client-side `BOOL_AND` over the sample.
 
 ### Expected behavior
 
 For every sampled `user_id`, the correlated scalar `SUM` equals `windows.lifetime_sum` (and Query B). `BOOL_AND(match)` is true.
 
-### Actual behavior
+### Actual behavior (v3.0.3)
 
-Query A / `BOOL_AND` over the derived sample disagrees (scalar side systematically wrong). Query B matches. See the CI log and `scripts/run-repro.sh` output on the repro repo.
+- Control `WHERE user_id = '<literal>'` + correlated `SUM`: **correct**.
+- Query A `ORDER BY random() LIMIT 50` + correlated `SUM`: **29/50 NULL** sums in CI; `BOOL_AND` is not true.
+- `LIMIT 50` without `ORDER BY`: still NULLs (20/50).
+- `LATERAL (SELECT SUM(...) WHERE h.user_id = s.user_id)`: **correct** (hash-join to a full agg, no re-sample).
+- Query B `VALUES` + `IN` + `GROUP BY` + `JOIN`: **correct**.
+
+`EXPLAIN` of Query A re-runs `BatchTopN { order: [Random], limit: 50 }` independently on the aggregate side, then `LeftOuter`/`FullOuter` joins on `user_id`. Two `random()` samples do not contain the same keys, so the scalar `SUM` is NULL.
 
 ### Workaround
 
-Do not correlate a scalar `SUM` against a `random()/LIMIT` derived table. Materialize the id list (`VALUES` or a table) and compute `SUM` with `WHERE user_id IN (...) GROUP BY user_id`, then `JOIN`.
+Do not correlate a scalar `SUM` against a `random()`/`LIMIT` derived table. Materialize the id list (`VALUES` or a table) and compute `SUM` with `WHERE user_id IN (...) GROUP BY user_id`, then `JOIN`. `LATERAL` also produced correct results on v3.0.3.
 
 ### Additional context
 
