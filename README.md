@@ -60,8 +60,8 @@ RW_IMAGE=risingwavelabs/risingwave:vX.Y.Z docker compose up -d --wait risingwave
 
 **Query A** (suspected buggy path) — several variants, first matching production:
 
-1. Sample `FROM (SELECT user_id FROM windows ORDER BY random() LIMIT 50)` + correlated scalar `SUM`.
-2. Same sample with several scalars at once (`SUM` lifetime, `SUM` day-1, `COUNT(*)`).
+1. Sample `FROM (SELECT user_id FROM windows ORDER BY random() LIMIT 50)` + correlated scalar `SUM`. `match` is `abs(expected_sum - scalar_sum) < eps` on that same alias (not a second `SUM`).
+2. Same sample with several scalars at once (`SUM` lifetime, `SUM` day-1, `COUNT(*)`); `match` uses those aliases.
 3. `LATERAL` form of the same `SUM`.
 4. Derived `LIMIT 50` without `ORDER BY`.
 5. Client-side `BOOL_AND(match)` over that sample (RisingWave rejects a subquery inside `BOOL_AND`).
@@ -75,11 +75,13 @@ If `random()` is missing on a build, the script falls back to `ORDER BY md5(user
 | Variant | Result on v3.0.3 |
 | --- | --- |
 | `control_literal_user` | 1/1 match |
-| `sample_random_limit_scalar` | ~18–21/50 match; remaining `SUM`s **NULL** (varies with `random()`) |
-| `sample_multi_scalar` | worse (two independent random samples) |
+| `sample_random_limit_scalar` | 31/50 match, **19 NULL** `SUM`s (`match_null` = `scalar_sum_null`) |
+| `sample_multi_scalar` | 15/50 match (lifetime / day-1 / count each have their own SUM) |
 | `sample_lateral` | 50/50 match |
-| `sample_limit_only` | 30/50 match, 20 NULL |
+| `sample_limit_only` | 40/50 match, 10 NULL |
 | Query B (`VALUES` + `IN` + `GROUP BY` + `JOIN`) | **50/50 match** (workaround) |
+
+Example CI log: [repro run 34492099604](https://github.com/tsekityam/rw-correlated-scalar-repro/actions/runs/34492099604) (`BUG REPRODUCED`, Query B 50/50). Counts vary with `random()`.
 
 `EXPLAIN` of Query A shows the optimizer **re-executing** `TopN { order: [Random], limit: 50 }` (or `Limit 50`) on **both** sides of a `LeftOuter` / `FullOuter` join. Because `random()` is non-deterministic, the two samples are different users; the join then yields `NULL` for the scalar `SUM`. That is why a single-user literal probe can be correct while the sample path is systematically empty.
 
@@ -127,6 +129,9 @@ docker compose --profile test run --rm tester
 2. Install `postgresql-client`
 3. `bash scripts/run-repro.sh` against `localhost:4566`
 
+Example intended failure (`BUG REPRODUCED`, Query B 50/50, `match` derived from the same `scalar_sum`):  
+https://github.com/tsekityam/rw-correlated-scalar-repro/actions/runs/34492099604
+
 ### Exit codes (the signal)
 
 | Code | Meaning |
@@ -159,7 +164,7 @@ when `s` is produced by a derived table such as:
 (SELECT user_id FROM windows ORDER BY random() LIMIT 50)
 ```
 
-On a synthetic dataset with a known lifetime `SUM` per `user_id`, this path disagrees with a pre-aggregated `GROUP BY user_id` materialized view (`windows`). On v3.0.3 the scalar side is often **NULL** (29/50 rows in one CI run), so a `BOOL_AND(abs(delta) < eps)` over the sample is not true. If the caller coalesces NULL to 0, the source side looks like ~0.
+On a synthetic dataset with a known lifetime `SUM` per `user_id`, this path disagrees with a pre-aggregated `GROUP BY user_id` materialized view (`windows`). On v3.0.3 the scalar side is often **NULL** (19/50 rows in [this CI run](https://github.com/tsekityam/rw-correlated-scalar-repro/actions/runs/34492099604)), so a `BOOL_AND(abs(delta) < eps)` over the sample is not true. If the caller coalesces NULL to 0, the source side looks like ~0.
 
 The **same** `user_id`s computed via a fixed `VALUES` list + `WHERE user_id IN (...)` + `GROUP BY` + `JOIN` match the MV exactly.
 
@@ -180,6 +185,9 @@ psql -c '\i sql/seed.sql'
 ```
 
 Pinned image: `risingwavelabs/risingwave:v3.0.3` (`single_node --in-memory`). CI on that repo runs the same compose stack.
+
+Example failing job (intended `BUG REPRODUCED`; Query B matches):  
+https://github.com/tsekityam/rw-correlated-scalar-repro/actions/runs/34492099604
 
 Schema (synthetic):
 
@@ -230,8 +238,8 @@ For every sampled `user_id`, the correlated scalar `SUM` equals `windows.lifetim
 ### Actual behavior (v3.0.3)
 
 - Control `WHERE user_id = '<literal>'` + correlated `SUM`: **correct**.
-- Query A `ORDER BY random() LIMIT 50` + correlated `SUM`: **29/50 NULL** sums in CI; `BOOL_AND` is not true.
-- `LIMIT 50` without `ORDER BY`: still NULLs (20/50).
+- Query A `ORDER BY random() LIMIT 50` + correlated `SUM`: **19/50 NULL** sums in [CI run 34492099604](https://github.com/tsekityam/rw-correlated-scalar-repro/actions/runs/34492099604); `BOOL_AND` is not true.
+- `LIMIT 50` without `ORDER BY`: still NULLs (10/50 in that run).
 - `LATERAL (SELECT SUM(...) WHERE h.user_id = s.user_id)`: **correct** (hash-join to a full agg, no re-sample).
 - Query B `VALUES` + `IN` + `GROUP BY` + `JOIN`: **correct**.
 
