@@ -3,10 +3,11 @@
 -- and each sampled user is aggregated with a correlated scalar SUM.
 --
 -- Observed symptom: scalar_sum systematically disagrees with the
--- pre-aggregated windows MV (often ~0 / all match flags false).
+-- pre-aggregated windows MV (often NULL / match is not true).
 --
--- Substitute :sample_order with `random()` when available, otherwise
--- another non-constant ORDER BY expression.
+-- This file is a manual example and always uses ORDER BY random().
+-- scripts/run-repro.sh runs the same pattern; if random() is missing it
+-- falls back to ORDER BY md5(user_id) in the generated SQL, not here.
 
 SELECT
     s.user_id,

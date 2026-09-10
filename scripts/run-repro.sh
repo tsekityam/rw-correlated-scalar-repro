@@ -352,15 +352,11 @@ if [[ -s "${PRIMARY_TSV}" ]]; then
   stats="$(count_bool_col 4 < "${PRIMARY_TSV}")"
   read -r n n_true n_false n_null <<<"${stats}"
   echo "BOOL_AND(match) over sample_random_limit_scalar: n=${n} true=${n_true} false=${n_false} null=${n_null}"
-  A_RAN=$((A_RAN + 1))
+  echo "(Derived from that variant's TSV; not counted as a separate Query A run.)"
   if [[ "${n}" -gt 0 && "${n_true}" -eq "${n}" ]]; then
     echo "OK: client-side BOOL_AND is true."
   else
     echo "MISMATCH: client-side BOOL_AND is not true (production-style all-false / NULL sample check)."
-    A_MISMATCH=$((A_MISMATCH + 1))
-    if [[ -z "${REPRO_VARIANT}" ]]; then
-      REPRO_VARIANT="bool_and_summary"
-    fi
   fi
 else
   echo "No primary sample TSV; skipping client-side BOOL_AND."

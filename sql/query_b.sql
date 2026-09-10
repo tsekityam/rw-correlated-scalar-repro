@@ -6,7 +6,9 @@ WITH ids(user_id) AS (
     VALUES
         ('aaaaaaaa-bbbb-4ccc-8ddd-000000000001'),
         ('aaaaaaaa-bbbb-4ccc-8ddd-000000000002')
-        -- run-repro.sh substitutes the sampled ids
+        -- Replace this VALUES list with user_ids from Query A when
+        -- comparing the same sample. scripts/run-repro.sh builds Query B
+        -- inline from the sampled ids and does not edit this file.
 )
 SELECT
     i.user_id,
