@@ -1,0 +1,14 @@
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/base:ubuntu
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    depends_on:
+      risingwave:
+        condition: service_healthy
+    environment:
+      PGHOST: risingwave
+      PGPORT: "4566"
+      PGDATABASE: dev
+      PGUSER: root
