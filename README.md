@@ -75,11 +75,11 @@ If `random()` is missing on a build, the script falls back to `ORDER BY md5(user
 | Variant | Result on v3.0.3 |
 | --- | --- |
 | `control_literal_user` | 1/1 match |
-| `sample_random_limit_scalar` | 21/50 match, **29 NULL** `SUM`s |
-| `sample_multi_scalar` | 13/50 match, 37 NULL |
+| `sample_random_limit_scalar` | ~18–21/50 match; remaining `SUM`s **NULL** (varies with `random()`) |
+| `sample_multi_scalar` | worse (two independent random samples) |
 | `sample_lateral` | 50/50 match |
 | `sample_limit_only` | 30/50 match, 20 NULL |
-| Query B (`VALUES` + `IN` + `GROUP BY` + `JOIN`) | matches (workaround) |
+| Query B (`VALUES` + `IN` + `GROUP BY` + `JOIN`) | **50/50 match** (workaround) |
 
 `EXPLAIN` of Query A shows the optimizer **re-executing** `TopN { order: [Random], limit: 50 }` (or `Limit 50`) on **both** sides of a `LeftOuter` / `FullOuter` join. Because `random()` is non-deterministic, the two samples are different users; the join then yields `NULL` for the scalar `SUM`. That is why a single-user literal probe can be correct while the sample path is systematically empty.
 
