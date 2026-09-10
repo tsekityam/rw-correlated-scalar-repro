@@ -48,7 +48,7 @@ RW_IMAGE=risingwavelabs/risingwave:vX.Y.Z docker compose up -d --wait risingwave
 
 `hourly_facts(user_id text, hour_utc timestamp, amount numeric)`:
 
-- 80 users, uuid-shaped **text** keys (`aaaaaaaa-bbbb-4ccc-8ddd-000000000001` …). No `UUID` type.
+- 80 users with **text** keys (`aaaaaaaa-bbbb-4ccc-8ddd-000000000001` …).
 - 48 hourly rows each (2024-01-01 00:00 through 2024-01-02 23:00).
 - `amount = 1000 * u + hour_index`, so totals are known a priori:
   - lifetime `SUM` = `48000*u + 1128` (user 1 → `49128`)
@@ -83,19 +83,9 @@ If `random()` is missing on a build, the script falls back to `ORDER BY md5(user
 
 `EXPLAIN` of Query A shows the optimizer **re-executing** `TopN { order: [Random], limit: 50 }` (or `Limit 50`) on **both** sides of a `LeftOuter` / `FullOuter` join. Because `random()` is non-deterministic, the two samples are different users; the join then yields `NULL` for the scalar `SUM`. That is why a single-user literal probe can be correct while the sample path is systematically empty.
 
-Secondary (logged, not the fail reason):
-
-- `WITH s AS MATERIALIZED (...)` → `sql parser error: Expected 'changelog' but found 'MATERIALIZED'`
-- `CAST(... AS UUID)` → `unsupported data type: UUID`
-
 **Query B** (known-good workaround) — the sampled ids as `VALUES`, `WHERE user_id IN (...)`, `GROUP BY user_id`, `JOIN` back to `windows`. This must match.
 
 **Control** — `WHERE user_id = '<literal>'` + the same correlated `SUM` (often correct even when A is not).
-
-**Secondary** (logged, not the primary fail):
-
-- `WITH s AS MATERIALIZED (...)` — parser rejects this; RisingWave expects `AS CHANGELOG`.
-- `CAST(x AS UUID)` / UUID type — unsupported. Keys stay `VARCHAR`.
 
 ## How to run locally
 
@@ -242,13 +232,6 @@ For every sampled `user_id`, the correlated scalar `SUM` equals `windows.lifetim
 ### Workaround
 
 Do not correlate a scalar `SUM` against a `random()`/`LIMIT` derived table. Materialize the id list (`VALUES` or a table) and compute `SUM` with `WHERE user_id IN (...) GROUP BY user_id`, then `JOIN`. `LATERAL` also produced correct results on v3.0.3.
-
-### Additional context
-
-Secondary, independent of the wrong `SUM`:
-
-1. `WITH s AS MATERIALIZED (SELECT ...)` is rejected by the parser (`Expected 'changelog'`). RisingWave uses `AS CHANGELOG` here, not Postgres CTE materialization.
-2. `CAST(x AS UUID)` / type `UUID` is unsupported. The repro uses uuid-shaped `VARCHAR` keys.
 
 ---
 

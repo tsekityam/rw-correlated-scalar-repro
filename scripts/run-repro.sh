@@ -82,24 +82,6 @@ FROM windows
 WHERE user_id = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001';
 "
 
-banner "Secondary checks (documented; do not fail the primary test)"
-set +e
-AS_MAT_ERR=$(psql_ok -c 'WITH s AS MATERIALIZED (SELECT 1 AS x) SELECT * FROM s;' 2>&1)
-AS_MAT_RC=$?
-UUID_ERR=$(psql_ok -c 'SELECT CAST('"'"'aaaaaaaa-bbbb-4ccc-8ddd-000000000001'"'"' AS UUID);' 2>&1)
-UUID_RC=$?
-set -e
-echo "--- AS MATERIALIZED (exit ${AS_MAT_RC}) ---"
-echo "${AS_MAT_ERR}"
-echo "--- CAST AS UUID (exit ${UUID_RC}) ---"
-echo "${UUID_ERR}"
-if echo "${AS_MAT_ERR}" | grep -qi "changelog"; then
-  echo "NOTE: AS MATERIALIZED is rejected; parser expects CHANGELOG (as observed)."
-fi
-if [[ "${UUID_RC}" -ne 0 ]]; then
-  echo "NOTE: UUID / CAST(... AS UUID) is unsupported on this build (as observed)."
-fi
-
 # Prefer ORDER BY random() to match the production sample pattern.
 SAMPLE_ORDER="random()"
 if try_sql "SELECT random();"; then
@@ -404,8 +386,6 @@ banner "Verdict"
 echo "RisingWave: ${RW_VERSION:-<unknown>}"
 echo "Query A variants run: ${A_RAN}; mismatching variants: ${A_MISMATCH}"
 echo "Query B ran: ${B_RAN}; mismatch: ${B_MISMATCH}"
-echo "AS MATERIALIZED exit: ${AS_MAT_RC}"
-echo "CAST AS UUID exit: ${UUID_RC}"
 
 if [[ "${B_MISMATCH}" -ne 0 || "${B_RAN}" -eq 0 ]]; then
   echo "SETUP/WORKAROUND FAILURE: Query B did not confirm ground truth."
